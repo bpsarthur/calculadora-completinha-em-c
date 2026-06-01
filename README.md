@@ -82,6 +82,13 @@ O `build.bat`/`Makefile` já apontam para a raylib que baixei em
 ### 8. Conversão de unidades
 - Comprimento, massa, área, volume, tempo, velocidade, dados, ângulo,
   pressão, energia e **temperatura** (C/F/K).
+- **Moeda com cotação ao vivo**: categoria "Moeda (online)" busca as taxas de
+  câmbio reais na hora do cálculo (USD, BRL, EUR, GBP, JPY, CNY, CAD, AUD,
+  CHF, ARS, MXN, INR). A busca roda em **segundo plano** (não trava a tela) e
+  mostra o horário da cotação. Requer internet.
+  - Fonte: [open.er-api.com](https://open.er-api.com) (gratuita, sem chave).
+  - Implementado em C com **WinINet** (`net.c`), isolado da raylib para evitar
+    conflitos da `windows.h`. Link: `-lwininet`.
 
 ## Sintaxe aceita pelo avaliador
 

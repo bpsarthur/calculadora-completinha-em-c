@@ -10,11 +10,13 @@
 #include "raygui.h"
 
 #include "expr.h"
+#include "net.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <time.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -795,7 +797,8 @@ static void draw_complex(Rectangle area){
  *  ABA: CONVERSAO
  * ==========================================================================*/
 typedef struct { const char* name; double factor; } Unit;
-typedef struct { const char* cat; const char* list; const Unit* units; int n; } Category;
+/* kind: 0 = fator fixo | 1 = temperatura | 2 = moeda (cotacao online) */
+typedef struct { const char* cat; const char* list; const Unit* units; int n; int kind; } Category;
 static const Unit U_len[] = {{"m",1},{"km",1000},{"cm",0.01},{"mm",0.001},{"mi",1609.344},{"yd",0.9144},{"ft",0.3048},{"in",0.0254},{"milha naut",1852}};
 static const Unit U_mass[]= {{"kg",1},{"g",0.001},{"mg",1e-6},{"t",1000},{"lb",0.45359237},{"oz",0.028349523}};
 static const Unit U_area[]= {{"m2",1},{"km2",1e6},{"cm2",1e-4},{"ha",10000},{"acre",4046.8564},{"ft2",0.09290304}};
@@ -806,18 +809,29 @@ static const Unit U_data[]= {{"byte",1},{"KB",1024},{"MB",1048576},{"GB",1073741
 static const Unit U_ang[] = {{"rad",1},{"grau",M_PI/180.0},{"grad",M_PI/200.0}};
 static const Unit U_pres[]= {{"Pa",1},{"kPa",1000},{"bar",100000},{"atm",101325},{"mmHg",133.322},{"psi",6894.757}};
 static const Unit U_en[]  = {{"J",1},{"kJ",1000},{"cal",4.184},{"kcal",4184},{"Wh",3600},{"kWh",3.6e6},{"eV",1.602176634e-19}};
+
+/* ---- Moeda: codigos (mesma ordem da lista do dropdown) e cotacoes em CODE por 1 USD ---- */
+#define CURLIST "USD;BRL;EUR;GBP;JPY;CNY;CAD;AUD;CHF;ARS;MXN;INR"
+static const char* CUR[] = {"USD","BRL","EUR","GBP","JPY","CNY","CAD","AUD","CHF","ARS","MXN","INR"};
+#define NCUR ((int)(sizeof(CUR)/sizeof(CUR[0])))
+static double curRate[NCUR];          /* quantas unidades da moeda por 1 USD */
+static int    curLoaded = 0;
+static int    curFetching = 0;        /* 1 = busca em andamento (thread) */
+static char   curStatus[160] = "Clique em 'Atualizar cotacao' para buscar online.";
+
 static const Category cats[] = {
-    {"Comprimento","m;km;cm;mm;mi;yd;ft;in;milha naut", U_len, 9},
-    {"Massa","kg;g;mg;t;lb;oz", U_mass,6},
-    {"Area","m2;km2;cm2;ha;acre;ft2", U_area,6},
-    {"Volume","L;mL;m3;gal(US);gal(UK);ft3", U_vol,6},
-    {"Tempo","s;min;h;dia;semana;ano", U_time,6},
-    {"Velocidade","m/s;km/h;mph;no", U_spd,4},
-    {"Dados","byte;KB;MB;GB;TB;bit", U_data,6},
-    {"Angulo","rad;grau;grad", U_ang,3},
-    {"Pressao","Pa;kPa;bar;atm;mmHg;psi", U_pres,6},
-    {"Energia","J;kJ;cal;kcal;Wh;kWh;eV", U_en,7},
-    {"Temperatura","C;F;K", NULL,3},
+    {"Comprimento","m;km;cm;mm;mi;yd;ft;in;milha naut", U_len, 9, 0},
+    {"Massa","kg;g;mg;t;lb;oz", U_mass,6, 0},
+    {"Area","m2;km2;cm2;ha;acre;ft2", U_area,6, 0},
+    {"Volume","L;mL;m3;gal(US);gal(UK);ft3", U_vol,6, 0},
+    {"Tempo","s;min;h;dia;semana;ano", U_time,6, 0},
+    {"Velocidade","m/s;km/h;mph;no", U_spd,4, 0},
+    {"Dados","byte;KB;MB;GB;TB;bit", U_data,6, 0},
+    {"Angulo","rad;grau;grad", U_ang,3, 0},
+    {"Pressao","Pa;kPa;bar;atm;mmHg;psi", U_pres,6, 0},
+    {"Energia","J;kJ;cal;kcal;Wh;kWh;eV", U_en,7, 0},
+    {"Temperatura","C;F;K", NULL,3, 1},
+    {"Moeda (online)", CURLIST, NULL, NCUR, 2},
 };
 #define NCATS ((int)(sizeof(cats)/sizeof(cats[0])))
 static int convCat=0, convFrom=0, convTo=1;
@@ -825,35 +839,109 @@ static char convInp[32]="1", conv_out[64]="";
 static bool ddCatOpen=false, ddFromOpen=false, ddToOpen=false;
 static double temp_to_base(int u,double v){ if(u==0)return v; if(u==1)return (v-32)*5.0/9.0; return v-273.15; }
 static double temp_from_base(int u,double c){ if(u==0)return c; if(u==1)return c*9.0/5.0+32; return c+273.15; }
+
+/* extrai "CODE":numero de um JSON simples */
+static int json_rate(const char* json, const char* code, double* out){
+    char key[16]; snprintf(key,16,"\"%s\":",code);
+    const char* p = strstr(json, key);
+    if(!p) return 0;
+    *out = atof(p + strlen(key));
+    return 1;
+}
+static void do_convert(void);   /* definida adiante */
+
+/* inicia a busca em segundo plano (nao trava a UI) */
+static void start_fetch(void){
+    if (curFetching) return;
+    curFetching = 1;
+    snprintf(curStatus,160,"Buscando cotacao online...");
+    http_get_async("https://open.er-api.com/v6/latest/USD");
+}
+/* aplica o JSON recebido as cotacoes */
+static void apply_rates(const char* buf){
+    if (!strstr(buf,"\"rates\"") && !strstr(buf,"\"success\"")){ curLoaded=0; snprintf(curStatus,160,"Resposta inesperada da API."); return; }
+    int ok=1;
+    for (int i=0;i<NCUR;i++){ double r; if(json_rate(buf,CUR[i],&r) && r>0) curRate[i]=r; else ok=0; }
+    if (ok){
+        curLoaded=1;
+        time_t t=time(NULL); struct tm* lt=localtime(&t);
+        char ts[64]; strftime(ts,64,"%d/%m/%Y %H:%M:%S", lt);
+        snprintf(curStatus,160,"Cotacao ao vivo - obtida em %s (base USD)", ts);
+    } else { curLoaded=0; snprintf(curStatus,160,"Erro ao interpretar a cotacao."); }
+}
+/* chamada a cada frame no main: verifica se a busca terminou */
+static void poll_fetch(void){
+    if (!curFetching) return;
+    static char rbuf[1<<15];
+    int r = http_get_poll(rbuf, sizeof(rbuf));
+    if (r==1){ curFetching=0; apply_rates(rbuf); do_convert(); }
+    else if (r==-1){ curFetching=0; curLoaded=0; snprintf(curStatus,160,"Falha de conexao - verifique a internet."); }
+}
 static void do_convert(void){
     double v=atof(convInp); const Category* C=&cats[convCat];
-    if (C->units==NULL){ double base=temp_to_base(convFrom,v); snprintf(conv_out,64,"%.8g", temp_from_base(convTo,base)); }
-    else{
+    if (C->kind==2){              /* moeda */
+        if(convFrom>=NCUR)convFrom=0;
+        if(convTo>=NCUR)convTo=0;
+        if(!curLoaded || curRate[convFrom]<=0){ snprintf(conv_out,64,"---"); return; }
+        double usd = v / curRate[convFrom];
+        snprintf(conv_out,64,"%.4f", usd * curRate[convTo]);
+    } else if (C->kind==1){       /* temperatura */
+        double base=temp_to_base(convFrom,v); snprintf(conv_out,64,"%.8g", temp_from_base(convTo,base));
+    } else {                      /* fator fixo */
         if(convFrom>=C->n)convFrom=0;
         if(convTo>=C->n)convTo=0;
         double base=v*C->units[convFrom].factor; snprintf(conv_out,64,"%.10g", base/C->units[convTo].factor);
     }
 }
+static const char* unit_name(int cat, int idx){
+    const Category* C=&cats[cat];
+    if (C->kind==2) return CUR[(idx<NCUR)?idx:0];
+    if (C->kind==1) return idx==0?"C":idx==1?"F":"K";
+    return C->units[(idx<C->n)?idx:0].name;
+}
 static void draw_convert(Rectangle area){
     float x=area.x,y=area.y;
+    const Category* C=&cats[convCat];
+    int isCur = (C->kind==2);
+
     GuiLabel(R(x,y,120,28),"Categoria:");
     GuiLabel(R(x,y+44,120,28),"De:");
     GuiLabel(R(x+260,y+44,40,28),"Para:");
     GuiLabel(R(x,y+96,120,28),"Valor:");
     if (EditBox(R(x+90,y+96,160,32), convInp, sizeof(convInp))) do_convert();
-    if (CBtn(R(x+260,y+96,140,32),"Converter",TH.bAccent,WHITE)) do_convert();
-    const char* toname = cats[convCat].units ? cats[convCat].units[(convTo<cats[convCat].n)?convTo:0].name
-                                              : (convTo==0?"C":convTo==1?"F":"K");
-    DrawText(TextFormat("= %s %s", conv_out, toname), (int)x, (int)y+150, 28, TH.header);
+
+    /* Para moeda: o botao Converter dispara a busca online no momento do calculo */
+    if (CBtn(R(x+260,y+96,160,32), isCur?"Converter (online)":"Converter", TH.bAccent, WHITE)){
+        if (isCur) start_fetch();
+        do_convert();
+    }
+
+    DrawText(TextFormat("= %s %s", conv_out, unit_name(convCat,convTo)), (int)x, (int)y+150, 28, TH.header);
+
+    if (isCur){
+        if (CBtn(R(x+430,y+96,170,32), "Atualizar cotacao", TH.bOp, TH.bTxt)) start_fetch();
+        DrawText(curStatus, (int)x, (int)y+196, 16, TH.sub);
+        DrawText("Fonte: open.er-api.com (gratis, sem chave). Requer internet.",
+                 (int)x, (int)y+218, 14, TH.sub);
+        if (curLoaded){
+            /* tabela rapida: 1 USD = ... nas principais */
+            DrawText(TextFormat("1 USD = %.4f BRL   |   1 EUR = %.4f BRL   |   1 BRL = %.4f USD",
+                     curRate[1], curRate[1]/curRate[2], 1.0/curRate[1]),
+                     (int)x, (int)y+248, 16, TH.dispText);
+        }
+    }
 
     /* dropdowns por ultimo (z-order) */
-    const Category* C=&cats[convCat];
     if (GuiDropdownBox(R(x+260,y+44,200,32), C->list, &convTo, ddToOpen)){ ddToOpen=!ddToOpen; do_convert(); }
     if (GuiDropdownBox(R(x+90,y+44,150,32), C->list, &convFrom, ddFromOpen)){ ddFromOpen=!ddFromOpen; do_convert(); }
     static char catlist[256]; if(catlist[0]==0){ int o=0; for(int i=0;i<NCATS;i++) o+=snprintf(catlist+o,256-o,"%s%s", i?";":"", cats[i].cat); }
     int prevCat=convCat;
     if (GuiDropdownBox(R(x+110,y,200,32), catlist, &convCat, ddCatOpen)){ ddCatOpen=!ddCatOpen; }
-    if (convCat!=prevCat){ convFrom=0; convTo=1; do_convert(); }
+    if (convCat!=prevCat){
+        convFrom=0; convTo=1;
+        if (cats[convCat].kind==2 && !curLoaded) start_fetch();  /* busca ao entrar em Moeda */
+        do_convert();
+    }
 }
 
 /* ============================================================================
@@ -877,6 +965,7 @@ int main(void){
         int sw=GetScreenWidth(), sh=GetScreenHeight();
         g_idCounter = 0;
         if (activeTab != prevTab){ g_editId=-1; prevTab=activeTab; }
+        poll_fetch();   /* verifica se a cotacao em segundo plano chegou */
 
         /* largura de conteudo centralizada (limita o estiramento em telas largas) */
         float CW = (float)sw - 32; if (CW > 1180) CW = 1180;
