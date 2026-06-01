@@ -1,0 +1,15 @@
+# Normaliza quebras de linha automaticamente nos arquivos de texto
+* text=auto
+
+# Codigo-fonte: sempre LF no repositorio
+*.c   text eol=lf
+*.h   text eol=lf
+*.md  text eol=lf
+
+# Scripts do Windows: CRLF
+*.bat text eol=crlf
+
+# Binarios (nao mexer)
+*.a   binary
+*.dll binary
+*.png binary

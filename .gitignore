@@ -1,0 +1,25 @@
+# ---- Saidas de compilacao ----
+calculadora.exe
+*.exe
+*.o
+*.obj
+*.a.tmp
+
+# ---- Artefatos de teste/debug ----
+_shot_*.png
+_test_*
+_smoketest*
+
+# ---- Editores / IDE ----
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---- Sistema operacional ----
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Observacao: a pasta libs/ (raylib + raygui) E versionada de proposito,
+# para que 'build.bat' compile sem precisar baixar dependencias.
