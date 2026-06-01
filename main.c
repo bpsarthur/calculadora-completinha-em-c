@@ -947,11 +947,40 @@ static void draw_convert(Rectangle area){
 /* ============================================================================
  *  MAIN
  * ==========================================================================*/
+/* informacoes do monitor onde a janela esta (preenchidas no main) */
+static int g_monIndex = 0, g_monW = 0, g_monH = 0, g_refresh = 60;
+
 int main(void){
-    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+    /* FLAG_VSYNC_HINT sincroniza a renderizacao com a taxa do monitor (sem tearing) */
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     InitWindow(1200, 800, "Calculadora Cientifica - C / raylib");
+
+    /* --- adapta janela e FPS ao monitor onde o programa esta situado --- */
+    g_monIndex = GetCurrentMonitor();
+    g_monW     = GetMonitorWidth(g_monIndex);
+    g_monH     = GetMonitorHeight(g_monIndex);
+    g_refresh  = GetMonitorRefreshRate(g_monIndex);
+    if (g_refresh <= 0) g_refresh = 60;          /* fallback se o driver nao informar */
+    if (g_monW   <= 0)  g_monW = 1920;
+    if (g_monH   <= 0)  g_monH = 1080;
+
+    /* tamanho proporcional ao monitor (70% larg x 80% alt), com limites sensatos */
+    int winW = (int)(g_monW * 0.70f);
+    int winH = (int)(g_monH * 0.80f);
+    if (winW < 960)   winW = 960;
+    if (winH < 700)   winH = 700;
+    if (winW > g_monW) winW = g_monW;
+    if (winH > g_monH) winH = g_monH;
+    SetWindowSize(winW, winH);
     SetWindowMinSize(960, 700);
-    SetTargetFPS(60);
+
+    /* centraliza a janela no monitor atual (considera a posicao dele no desktop) */
+    Vector2 mp = GetMonitorPosition(g_monIndex);
+    SetWindowPosition((int)mp.x + (g_monW - winW)/2, (int)mp.y + (g_monH - winH)/2);
+
+    /* FPS alvo = taxa de atualizacao do monitor (o vsync acima ja sincroniza nesse ritmo) */
+    SetTargetFPS(g_refresh);
+
     apply_theme(darkMode);
 
     expr_init(&ctx);
@@ -967,6 +996,15 @@ int main(void){
         if (activeTab != prevTab){ g_editId=-1; prevTab=activeTab; }
         poll_fetch();   /* verifica se a cotacao em segundo plano chegou */
 
+        /* se a janela foi movida para outro monitor, re-sincroniza o FPS com a nova taxa */
+        int curMon = GetCurrentMonitor();
+        if (curMon != g_monIndex){
+            g_monIndex = curMon;
+            g_monW = GetMonitorWidth(curMon); g_monH = GetMonitorHeight(curMon);
+            g_refresh = GetMonitorRefreshRate(curMon); if (g_refresh<=0) g_refresh=60;
+            SetTargetFPS(g_refresh);
+        }
+
         /* largura de conteudo centralizada (limita o estiramento em telas largas) */
         float CW = (float)sw - 32; if (CW > 1180) CW = 1180;
         float ox = (sw - CW)/2.0f;
@@ -976,6 +1014,9 @@ int main(void){
 
         DrawText("CALCULADORA CIENTIFICA", (int)ox, 14, 24, TH.header);
         DrawText("C + raylib / raygui", (int)ox+340, 22, 14, TH.sub);
+        /* leitura ao vivo: FPS atual | taxa do monitor | resolucao */
+        DrawText(TextFormat("%d FPS | %d Hz (vsync) | %dx%d", GetFPS(), g_refresh, g_monW, g_monH),
+                 (int)ox+500, 22, 14, TH.sub);
 
         /* botao de tema */
         if (GuiButton(R(ox+CW-150, 12, 150, 28), darkMode?"Tema: ESCURO":"Tema: CLARO")){
